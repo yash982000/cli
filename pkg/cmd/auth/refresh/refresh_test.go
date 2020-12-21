@@ -37,9 +37,11 @@ func Test_NewCmdRefresh(t *testing.T) {
 			wantsErr: true,
 		},
 		{
-			name:     "nontty hostname",
-			cli:      "-h aline.cedrac",
-			wantsErr: true,
+			name: "nontty hostname",
+			cli:  "-h aline.cedrac",
+			wants: RefreshOptions{
+				Hostname: "aline.cedrac",
+			},
 		},
 		{
 			name: "tty hostname",
@@ -213,7 +215,7 @@ func Test_refreshRun(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			aa := authArgs{}
-			tt.opts.AuthFlow = func(_ config.Config, hostname string, scopes []string) error {
+			tt.opts.AuthFlow = func(_ config.Config, _ *iostreams.IOStreams, hostname string, scopes []string) error {
 				aa.hostname = hostname
 				aa.scopes = scopes
 				return nil

@@ -8,7 +8,7 @@ import (
 
 	"github.com/cli/cli/api"
 	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/pkg/cmd/auth/client"
+	"github.com/cli/cli/pkg/cmd/auth/shared"
 	"github.com/cli/cli/pkg/cmdutil"
 	"github.com/cli/cli/pkg/httpmock"
 	"github.com/cli/cli/pkg/iostreams"
@@ -118,6 +118,28 @@ func Test_NewCmdLogin(t *testing.T) {
 			cli:      "--web --with-token",
 			wantsErr: true,
 		},
+		{
+			name:     "tty one scope",
+			stdinTTY: true,
+			cli:      "--scopes repo:invite",
+			wants: LoginOptions{
+				Hostname:    "",
+				Scopes:      []string{"repo:invite"},
+				Token:       "",
+				Interactive: true,
+			},
+		},
+		{
+			name:     "tty scopes",
+			stdinTTY: true,
+			cli:      "--scopes repo:invite,read:public_key",
+			wants: LoginOptions{
+				Hostname:    "",
+				Scopes:      []string{"repo:invite", "read:public_key"},
+				Token:       "",
+				Interactive: true,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -160,6 +182,7 @@ func Test_NewCmdLogin(t *testing.T) {
 			assert.Equal(t, tt.wants.Hostname, gotOpts.Hostname)
 			assert.Equal(t, tt.wants.Web, gotOpts.Web)
 			assert.Equal(t, tt.wants.Interactive, gotOpts.Interactive)
+			assert.Equal(t, tt.wants.Scopes, gotOpts.Scopes)
 		})
 	}
 }
@@ -239,11 +262,11 @@ func Test_loginRun_nontty(t *testing.T) {
 		tt.opts.IO = io
 		t.Run(tt.name, func(t *testing.T) {
 			reg := &httpmock.Registry{}
-			origClientFromCfg := client.ClientFromCfg
+			origClientFromCfg := shared.ClientFromCfg
 			defer func() {
-				client.ClientFromCfg = origClientFromCfg
+				shared.ClientFromCfg = origClientFromCfg
 			}()
-			client.ClientFromCfg = func(_ string, _ config.Config) (*api.Client, error) {
+			shared.ClientFromCfg = func(_ string, _ config.Config) (*api.Client, error) {
 				httpClient := &http.Client{Transport: reg}
 				return api.NewClientFromHTTP(httpClient), nil
 			}
@@ -319,6 +342,7 @@ func Test_loginRun_Survey(t *testing.T) {
 				as.StubOne(1)        // auth mode: token
 				as.StubOne("def456") // auth token
 				as.StubOne("HTTPS")  // git_protocol
+				as.StubOne(false)    // cache credentials
 			},
 			httpStubs: func(reg *httpmock.Registry) {
 				reg.Register(httpmock.REST("GET", "api/v3/"), httpmock.ScopesResponder("repo,read:org,"))
@@ -340,6 +364,7 @@ func Test_loginRun_Survey(t *testing.T) {
 				as.StubOne(1)              // auth mode: token
 				as.StubOne("def456")       // auth token
 				as.StubOne("HTTPS")        // git_protocol
+				as.StubOne(false)          // cache credentials
 			},
 			httpStubs: func(reg *httpmock.Registry) {
 				reg.Register(httpmock.REST("GET", "api/v3/"), httpmock.ScopesResponder("repo,read:org,"))
@@ -360,6 +385,7 @@ func Test_loginRun_Survey(t *testing.T) {
 				as.StubOne(1)        // auth mode: token
 				as.StubOne("def456") // auth token
 				as.StubOne("HTTPS")  // git_protocol
+				as.StubOne(false)    // cache credentials
 			},
 			wantErrOut: regexp.MustCompile("Tip: you can generate a Personal Access Token here https://github.com/settings/tokens"),
 		},
@@ -403,11 +429,11 @@ func Test_loginRun_Survey(t *testing.T) {
 
 		t.Run(tt.name, func(t *testing.T) {
 			reg := &httpmock.Registry{}
-			origClientFromCfg := client.ClientFromCfg
+			origClientFromCfg := shared.ClientFromCfg
 			defer func() {
-				client.ClientFromCfg = origClientFromCfg
+				shared.ClientFromCfg = origClientFromCfg
 			}()
-			client.ClientFromCfg = func(_ string, _ config.Config) (*api.Client, error) {
+			shared.ClientFromCfg = func(_ string, _ config.Config) (*api.Client, error) {
 				httpClient := &http.Client{Transport: reg}
 				return api.NewClientFromHTTP(httpClient), nil
 			}

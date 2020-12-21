@@ -23,7 +23,6 @@ type IssuesAndTotalCount struct {
 	TotalCount int
 }
 
-// Ref. https://developer.github.com/v4/object/issue/
 type Issue struct {
 	ID        string
 	Number    int
@@ -34,12 +33,8 @@ type Issue struct {
 	Body      string
 	CreatedAt time.Time
 	UpdatedAt time.Time
-	Comments  struct {
-		TotalCount int
-	}
-	Author struct {
-		Login string
-	}
+	Comments  Comments
+	Author    Author
 	Assignees struct {
 		Nodes []struct {
 			Login string
@@ -66,10 +61,15 @@ type Issue struct {
 	Milestone struct {
 		Title string
 	}
+	ReactionGroups ReactionGroups
 }
 
 type IssuesDisabledError struct {
 	error
+}
+
+type Author struct {
+	Login string
 }
 
 const fragments = `
@@ -79,7 +79,7 @@ const fragments = `
 		url
 		state
 		updatedAt
-		labels(first: 3) {
+		labels(first: 100) {
 			nodes {
 				name
 			}
@@ -252,13 +252,13 @@ func IssueList(client *Client, repo ghrepo.Interface, state string, labels []str
 
 	if milestoneString != "" {
 		var milestone *RepoMilestone
-		if milestoneNumber, err := strconv.Atoi(milestoneString); err == nil {
-			milestone, err = MilestoneByNumber(client, repo, milestoneNumber)
+		if milestoneNumber, err := strconv.ParseInt(milestoneString, 10, 32); err == nil {
+			milestone, err = MilestoneByNumber(client, repo, int32(milestoneNumber))
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			milestone, err = MilestoneByTitle(client, repo, milestoneString)
+			milestone, err = MilestoneByTitle(client, repo, "all", milestoneString)
 			if err != nil {
 				return nil, err
 			}
@@ -271,7 +271,7 @@ func IssueList(client *Client, repo ghrepo.Interface, state string, labels []str
 		variables["milestone"] = milestoneRESTID
 	}
 
-	var response struct {
+	type responseData struct {
 		Repository struct {
 			Issues struct {
 				TotalCount int
@@ -286,10 +286,12 @@ func IssueList(client *Client, repo ghrepo.Interface, state string, labels []str
 	}
 
 	var issues []Issue
+	var totalCount int
 	pageLimit := min(limit, 100)
 
 loop:
 	for {
+		var response responseData
 		variables["limit"] = pageLimit
 		err := client.GraphQL(repo.RepoHost(), query, variables, &response)
 		if err != nil {
@@ -298,6 +300,7 @@ loop:
 		if !response.Repository.HasIssuesEnabled {
 			return nil, fmt.Errorf("the '%s' repository has disabled issues", ghrepo.FullName(repo))
 		}
+		totalCount = response.Repository.Issues.TotalCount
 
 		for _, issue := range response.Repository.Issues.Nodes {
 			issues = append(issues, issue)
@@ -314,7 +317,7 @@ loop:
 		}
 	}
 
-	res := IssuesAndTotalCount{Issues: issues, TotalCount: response.Repository.Issues.TotalCount}
+	res := IssuesAndTotalCount{Issues: issues, TotalCount: totalCount}
 	return &res, nil
 }
 
@@ -339,7 +342,22 @@ func IssueByNumber(client *Client, repo ghrepo.Interface, number int) (*Issue, e
 				author {
 					login
 				}
-				comments {
+				comments(last: 1) {
+					nodes {
+						author {
+							login
+						}
+						authorAssociation
+						body
+						createdAt
+						includesCreatedEdit
+						reactionGroups {
+							content
+							users {
+								totalCount
+							}
+						}
+					}
 					totalCount
 				}
 				number
@@ -368,8 +386,14 @@ func IssueByNumber(client *Client, repo ghrepo.Interface, number int) (*Issue, e
 					}
 					totalCount
 				}
-				milestone{
+				milestone {
 					title
+				}
+				reactionGroups {
+					content
+					users {
+						totalCount
+					}
 				}
 			}
 		}
