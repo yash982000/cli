@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io/ioutil"
-	"os"
 	"testing"
 
 	"github.com/cli/cli/pkg/iostreams"
@@ -70,6 +69,8 @@ func Test_PreserveInput(t *testing.T) {
 		},
 	}
 
+	tempDir := t.TempDir()
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.state == nil {
@@ -78,9 +79,9 @@ func Test_PreserveInput(t *testing.T) {
 
 			io, _, _, errOut := iostreams.Test()
 
-			tf, tferr := tmpfile()
+			tf, tferr := ioutil.TempFile(tempDir, "testfile*")
 			assert.NoError(t, tferr)
-			defer os.Remove(tf.Name())
+			defer tf.Close()
 
 			io.TempFileOverride = tf
 
@@ -98,6 +99,7 @@ func Test_PreserveInput(t *testing.T) {
 			assert.NoError(t, err)
 
 			if tt.wantPreservation {
+				//nolint:staticcheck // prefer exact matchers over ExpectLines
 				test.ExpectLines(t, errOut.String(), tt.wantErrLine)
 				preserved := &IssueMetadataState{}
 				assert.NoError(t, json.Unmarshal(data, preserved))
@@ -109,14 +111,4 @@ func Test_PreserveInput(t *testing.T) {
 			}
 		})
 	}
-}
-
-func tmpfile() (*os.File, error) {
-	dir := os.TempDir()
-	tmpfile, err := ioutil.TempFile(dir, "testfile*")
-	if err != nil {
-		return nil, err
-	}
-
-	return tmpfile, nil
 }

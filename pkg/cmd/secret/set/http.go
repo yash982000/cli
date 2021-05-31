@@ -5,10 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/cli/cli/api"
-	"github.com/cli/cli/internal/ghinstance"
 	"github.com/cli/cli/internal/ghrepo"
 	"github.com/cli/cli/pkg/cmd/secret/shared"
 )
@@ -46,8 +46,7 @@ func getPubKey(client *api.Client, host, path string) (*PubKey, error) {
 	return &pk, nil
 }
 
-func getOrgPublicKey(client *api.Client, orgName string) (*PubKey, error) {
-	host := ghinstance.OverridableDefault()
+func getOrgPublicKey(client *api.Client, host, orgName string) (*PubKey, error) {
 	return getPubKey(client, host, fmt.Sprintf("orgs/%s/actions/secrets/public-key", orgName))
 }
 
@@ -66,11 +65,10 @@ func putSecret(client *api.Client, host, path string, payload SecretPayload) err
 	return client.REST(host, "PUT", path, requestBody, nil)
 }
 
-func putOrgSecret(client *api.Client, pk *PubKey, opts SetOptions, eValue string) error {
+func putOrgSecret(client *api.Client, host string, pk *PubKey, opts SetOptions, eValue string) error {
 	secretName := opts.SecretName
 	orgName := opts.OrgName
 	visibility := opts.Visibility
-	host := ghinstance.OverridableDefault()
 
 	var repositoryIDs []int
 	var err error
@@ -101,14 +99,15 @@ func putRepoSecret(client *api.Client, pk *PubKey, repo ghrepo.Interface, secret
 	return putSecret(client, repo.RepoHost(), path, payload)
 }
 
+// This does similar logic to `api.RepoNetwork`, but without the overfetching.
 func mapRepoNameToID(client *api.Client, host, orgName string, repositoryNames []string) ([]int, error) {
 	queries := make([]string, 0, len(repositoryNames))
-	for _, repoName := range repositoryNames {
+	for i, repoName := range repositoryNames {
 		queries = append(queries, fmt.Sprintf(`
-			%s: repository(owner: %q, name :%q) {
+			repo_%03d: repository(owner: %q, name: %q) {
 				databaseId
 			}
-		`, repoName, orgName, repoName))
+		`, i, orgName, repoName))
 	}
 
 	query := fmt.Sprintf(`query MapRepositoryNames { %s }`, strings.Join(queries, ""))
@@ -131,10 +130,15 @@ func mapRepoNameToID(client *api.Client, host, orgName string, repositoryNames [
 		return nil, fmt.Errorf("failed to look up repositories: %w", err)
 	}
 
-	result := make([]int, 0, len(repositoryNames))
+	repoKeys := make([]string, 0, len(repositoryNames))
+	for k := range graphqlResult {
+		repoKeys = append(repoKeys, k)
+	}
+	sort.Strings(repoKeys)
 
-	for _, repoName := range repositoryNames {
-		result = append(result, graphqlResult[repoName].DatabaseID)
+	result := make([]int, len(repositoryNames))
+	for i, k := range repoKeys {
+		result[i] = graphqlResult[k].DatabaseID
 	}
 
 	return result, nil

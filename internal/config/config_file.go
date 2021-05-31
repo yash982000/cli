@@ -3,31 +3,114 @@ package config
 import (
 	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
-	"path"
+	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"github.com/mitchellh/go-homedir"
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	GH_CONFIG_DIR   = "GH_CONFIG_DIR"
+	XDG_CONFIG_HOME = "XDG_CONFIG_HOME"
+	APP_DATA        = "AppData"
+)
+
+// Config path precedence
+// 1. GH_CONFIG_DIR
+// 2. XDG_CONFIG_HOME
+// 3. AppData (windows only)
+// 4. HOME
 func ConfigDir() string {
-	dir, _ := homedir.Expand("~/.config/gh")
-	return dir
+	var path string
+	if a := os.Getenv(GH_CONFIG_DIR); a != "" {
+		path = a
+	} else if b := os.Getenv(XDG_CONFIG_HOME); b != "" {
+		path = filepath.Join(b, "gh")
+	} else if c := os.Getenv(APP_DATA); runtime.GOOS == "windows" && c != "" {
+		path = filepath.Join(c, "GitHub CLI")
+	} else {
+		d, _ := os.UserHomeDir()
+		path = filepath.Join(d, ".config", "gh")
+	}
+
+	// If the path does not exist try migrating config from default paths
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		autoMigrateConfigDir(path)
+	}
+
+	return path
+}
+
+// Check default paths (os.UserHomeDir, and homedir.Dir) for existing configs
+// If configs exist then move them to newPath
+// TODO: Remove support for homedir.Dir location in v2
+func autoMigrateConfigDir(newPath string) {
+	path, err := os.UserHomeDir()
+	if oldPath := filepath.Join(path, ".config", "gh"); err == nil && dirExists(oldPath) {
+		migrateConfigDir(oldPath, newPath)
+		return
+	}
+
+	path, err = homedir.Dir()
+	if oldPath := filepath.Join(path, ".config", "gh"); err == nil && dirExists(oldPath) {
+		migrateConfigDir(oldPath, newPath)
+	}
+}
+
+func dirExists(path string) bool {
+	f, err := os.Stat(path)
+	return err == nil && f.IsDir()
+}
+
+var migrateConfigDir = func(oldPath, newPath string) {
+	if oldPath == newPath {
+		return
+	}
+
+	_ = os.MkdirAll(filepath.Dir(newPath), 0755)
+	_ = os.Rename(oldPath, newPath)
 }
 
 func ConfigFile() string {
-	return path.Join(ConfigDir(), "config.yml")
+	return filepath.Join(ConfigDir(), "config.yml")
 }
 
-func hostsConfigFile(filename string) string {
-	return path.Join(path.Dir(filename), "hosts.yml")
+func HostsConfigFile() string {
+	return filepath.Join(ConfigDir(), "hosts.yml")
 }
 
 func ParseDefaultConfig() (Config, error) {
-	return ParseConfig(ConfigFile())
+	return parseConfig(ConfigFile())
+}
+
+func HomeDirPath(subdir string) (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		// TODO: remove go-homedir fallback in GitHub CLI v2
+		if legacyDir, err := homedir.Dir(); err == nil {
+			return filepath.Join(legacyDir, subdir), nil
+		}
+		return "", err
+	}
+
+	newPath := filepath.Join(homeDir, subdir)
+	if s, err := os.Stat(newPath); err == nil && s.IsDir() {
+		return newPath, nil
+	}
+
+	// TODO: remove go-homedir fallback in GitHub CLI v2
+	if legacyDir, err := homedir.Dir(); err == nil {
+		legacyPath := filepath.Join(legacyDir, subdir)
+		if s, err := os.Stat(legacyPath); err == nil && s.IsDir() {
+			return legacyPath, nil
+		}
+	}
+
+	return newPath, nil
 }
 
 var ReadConfigFile = func(filename string) ([]byte, error) {
@@ -46,7 +129,7 @@ var ReadConfigFile = func(filename string) ([]byte, error) {
 }
 
 var WriteConfigFile = func(filename string, data []byte) error {
-	err := os.MkdirAll(path.Dir(filename), 0771)
+	err := os.MkdirAll(filepath.Dir(filename), 0771)
 	if err != nil {
 		return pathError(err)
 	}
@@ -57,11 +140,7 @@ var WriteConfigFile = func(filename string, data []byte) error {
 	}
 	defer cfgFile.Close()
 
-	n, err := cfgFile.Write(data)
-	if err == nil && n < len(data) {
-		err = io.ErrShortWrite
-	}
-
+	_, err = cfgFile.Write(data)
 	return err
 }
 
@@ -144,7 +223,7 @@ func migrateConfig(filename string) error {
 	return cfg.Write()
 }
 
-func ParseConfig(filename string) (Config, error) {
+func parseConfig(filename string) (Config, error) {
 	_, root, err := parseConfigFile(filename)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -165,7 +244,7 @@ func ParseConfig(filename string) (Config, error) {
 			return nil, fmt.Errorf("failed to reparse migrated config: %w", err)
 		}
 	} else {
-		if _, hostsRoot, err := parseConfigFile(hostsConfigFile(filename)); err == nil {
+		if _, hostsRoot, err := parseConfigFile(HostsConfigFile()); err == nil {
 			if len(hostsRoot.Content[0].Content) > 0 {
 				newContent := []*yaml.Node{
 					{Value: "hosts"},
@@ -198,7 +277,7 @@ func findRegularFile(p string) string {
 		if s, err := os.Stat(p); err == nil && s.Mode().IsRegular() {
 			return p
 		}
-		newPath := path.Dir(p)
+		newPath := filepath.Dir(p)
 		if newPath == p || newPath == "/" || newPath == "." {
 			break
 		}

@@ -1,7 +1,6 @@
 {
   "data": {
-    "repository": {
-      "issue": {
+    "node": {
         "comments": {
           "nodes": [
             {
@@ -242,6 +241,18 @@
             },
             {
               "author": {
+                "login": "sam-spam"
+              },
+              "authorAssociation": "NONE",
+              "body": "Spam comment",
+              "createdAt": "2020-01-01T12:00:00Z",
+              "includesCreatedEdit": true,
+              "isMinimized": true,
+              "minimizedReason": "spam",
+              "reactionGroups": []
+            },
+            {
+              "author": {
                 "login": "marseilles"
               },
               "authorAssociation": "COLLABORATOR",
@@ -300,9 +311,8 @@
               ]
             }
           ],
-          "totalCount": 5
+          "totalCount": 6
         }
       }
-    }
   }
 }

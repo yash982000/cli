@@ -5,10 +5,9 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"net/http"
-	"os/exec"
-	"strings"
 	"testing"
 
+	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/internal/config"
 	"github.com/cli/cli/internal/run"
 	"github.com/cli/cli/pkg/cmdutil"
@@ -20,10 +19,10 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func runCommand(httpClient *http.Client, cli string) (*test.CmdOut, error) {
+func runCommand(httpClient *http.Client, cli string, isTTY bool) (*test.CmdOut, error) {
 	io, _, stdout, stderr := iostreams.Test()
-	io.SetStdoutTTY(true)
-	io.SetStdinTTY(true)
+	io.SetStdoutTTY(isTTY)
+	io.SetStdinTTY(isTTY)
 	fac := &cmdutil.Factory{
 		IOStreams: io,
 		HttpClient: func() (*http.Client, error) {
@@ -83,12 +82,11 @@ func TestRepoCreate(t *testing.T) {
 
 	httpClient := &http.Client{Transport: reg}
 
-	var seenCmd *exec.Cmd
-	restoreCmd := run.SetPrepareCmd(func(cmd *exec.Cmd) run.Runnable {
-		seenCmd = cmd
-		return &test.OutputStub{}
-	})
-	defer restoreCmd()
+	cs, cmdTeardown := run.Stub()
+	defer cmdTeardown(t)
+
+	cs.Register(`git remote add -f origin https://github\.com/OWNER/REPO\.git`, 0, "")
+	cs.Register(`git rev-parse --show-toplevel`, 0, "")
 
 	as, surveyTearDown := prompt.InitAskStubber()
 	defer surveyTearDown()
@@ -106,7 +104,7 @@ func TestRepoCreate(t *testing.T) {
 		},
 	})
 
-	output, err := runCommand(httpClient, "REPO")
+	output, err := runCommand(httpClient, "REPO", true)
 	if err != nil {
 		t.Errorf("error running command `repo create`: %v", err)
 	}
@@ -114,10 +112,62 @@ func TestRepoCreate(t *testing.T) {
 	assert.Equal(t, "", output.String())
 	assert.Equal(t, "✓ Created repository OWNER/REPO on GitHub\n✓ Added remote https://github.com/OWNER/REPO.git\n", output.Stderr())
 
-	if seenCmd == nil {
-		t.Fatal("expected a command to run")
+	var reqBody struct {
+		Query     string
+		Variables struct {
+			Input map[string]interface{}
+		}
 	}
-	assert.Equal(t, "git remote add -f origin https://github.com/OWNER/REPO.git", strings.Join(seenCmd.Args, " "))
+
+	if len(reg.Requests) != 1 {
+		t.Fatalf("expected 1 HTTP request, got %d", len(reg.Requests))
+	}
+
+	bodyBytes, _ := ioutil.ReadAll(reg.Requests[0].Body)
+	_ = json.Unmarshal(bodyBytes, &reqBody)
+	if repoName := reqBody.Variables.Input["name"].(string); repoName != "REPO" {
+		t.Errorf("expected %q, got %q", "REPO", repoName)
+	}
+	if repoVisibility := reqBody.Variables.Input["visibility"].(string); repoVisibility != "PRIVATE" {
+		t.Errorf("expected %q, got %q", "PRIVATE", repoVisibility)
+	}
+	if _, ownerSet := reqBody.Variables.Input["ownerId"]; ownerSet {
+		t.Error("expected ownerId not to be set")
+	}
+}
+
+func TestRepoCreate_outsideGitWorkDir(t *testing.T) {
+	reg := &httpmock.Registry{}
+	reg.Register(
+		httpmock.GraphQL(`mutation RepositoryCreate\b`),
+		httpmock.StringResponse(`
+		{ "data": { "createRepository": {
+			"repository": {
+				"id": "REPOID",
+				"url": "https://github.com/OWNER/REPO",
+				"name": "REPO",
+				"owner": {
+					"login": "OWNER"
+				}
+			}
+		} } }`))
+
+	httpClient := &http.Client{Transport: reg}
+
+	cs, cmdTeardown := run.Stub()
+	defer cmdTeardown(t)
+
+	cs.Register(`git rev-parse --show-toplevel`, 1, "")
+	cs.Register(`git init REPO`, 0, "")
+	cs.Register(`git -C REPO remote add origin https://github\.com/OWNER/REPO\.git`, 0, "")
+
+	output, err := runCommand(httpClient, "REPO --private --confirm", false)
+	if err != nil {
+		t.Errorf("error running command `repo create`: %v", err)
+	}
+
+	assert.Equal(t, "https://github.com/OWNER/REPO\n", output.String())
+	assert.Equal(t, "", output.Stderr())
 
 	var reqBody struct {
 		Query     string
@@ -165,12 +215,11 @@ func TestRepoCreate_org(t *testing.T) {
 		} } }`))
 	httpClient := &http.Client{Transport: reg}
 
-	var seenCmd *exec.Cmd
-	restoreCmd := run.SetPrepareCmd(func(cmd *exec.Cmd) run.Runnable {
-		seenCmd = cmd
-		return &test.OutputStub{}
-	})
-	defer restoreCmd()
+	cs, cmdTeardown := run.Stub()
+	defer cmdTeardown(t)
+
+	cs.Register(`git remote add -f origin https://github\.com/ORG/REPO\.git`, 0, "")
+	cs.Register(`git rev-parse --show-toplevel`, 0, "")
 
 	as, surveyTearDown := prompt.InitAskStubber()
 	defer surveyTearDown()
@@ -188,18 +237,13 @@ func TestRepoCreate_org(t *testing.T) {
 		},
 	})
 
-	output, err := runCommand(httpClient, "ORG/REPO")
+	output, err := runCommand(httpClient, "ORG/REPO", true)
 	if err != nil {
 		t.Errorf("error running command `repo create`: %v", err)
 	}
 
 	assert.Equal(t, "", output.String())
 	assert.Equal(t, "✓ Created repository ORG/REPO on GitHub\n✓ Added remote https://github.com/ORG/REPO.git\n", output.Stderr())
-
-	if seenCmd == nil {
-		t.Fatal("expected a command to run")
-	}
-	assert.Equal(t, "git remote add -f origin https://github.com/ORG/REPO.git", strings.Join(seenCmd.Args, " "))
 
 	var reqBody struct {
 		Query     string
@@ -247,12 +291,11 @@ func TestRepoCreate_orgWithTeam(t *testing.T) {
 		} } }`))
 	httpClient := &http.Client{Transport: reg}
 
-	var seenCmd *exec.Cmd
-	restoreCmd := run.SetPrepareCmd(func(cmd *exec.Cmd) run.Runnable {
-		seenCmd = cmd
-		return &test.OutputStub{}
-	})
-	defer restoreCmd()
+	cs, cmdTeardown := run.Stub()
+	defer cmdTeardown(t)
+
+	cs.Register(`git remote add -f origin https://github\.com/ORG/REPO\.git`, 0, "")
+	cs.Register(`git rev-parse --show-toplevel`, 0, "")
 
 	as, surveyTearDown := prompt.InitAskStubber()
 	defer surveyTearDown()
@@ -270,18 +313,13 @@ func TestRepoCreate_orgWithTeam(t *testing.T) {
 		},
 	})
 
-	output, err := runCommand(httpClient, "ORG/REPO --team monkeys")
+	output, err := runCommand(httpClient, "ORG/REPO --team monkeys", true)
 	if err != nil {
 		t.Errorf("error running command `repo create`: %v", err)
 	}
 
 	assert.Equal(t, "", output.String())
 	assert.Equal(t, "✓ Created repository ORG/REPO on GitHub\n✓ Added remote https://github.com/ORG/REPO.git\n", output.Stderr())
-
-	if seenCmd == nil {
-		t.Fatal("expected a command to run")
-	}
-	assert.Equal(t, "git remote add -f origin https://github.com/ORG/REPO.git", strings.Join(seenCmd.Args, " "))
 
 	var reqBody struct {
 		Query     string
@@ -308,6 +346,7 @@ func TestRepoCreate_orgWithTeam(t *testing.T) {
 
 func TestRepoCreate_template(t *testing.T) {
 	reg := &httpmock.Registry{}
+	defer reg.Verify(t)
 	reg.Register(
 		httpmock.GraphQL(`mutation CloneTemplateRepository\b`),
 		httpmock.StringResponse(`
@@ -330,51 +369,35 @@ func TestRepoCreate_template(t *testing.T) {
 
 	httpClient := &http.Client{Transport: reg}
 
-	var seenCmd *exec.Cmd
-	restoreCmd := run.SetPrepareCmd(func(cmd *exec.Cmd) run.Runnable {
-		seenCmd = cmd
-		return &test.OutputStub{}
-	})
-	defer restoreCmd()
+	cs, cmdTeardown := run.Stub()
+	defer cmdTeardown(t)
 
-	as, surveyTearDown := prompt.InitAskStubber()
+	cs.Register(`git rev-parse --show-toplevel`, 1, "")
+	cs.Register(`git init REPO`, 0, "")
+	cs.Register(`git -C REPO remote add`, 0, "")
+	cs.Register(`git -C REPO fetch origin \+refs/heads/main:refs/remotes/origin/main`, 0, "")
+	cs.Register(`git -C REPO checkout main`, 0, "")
+
+	_, surveyTearDown := prompt.InitAskStubber()
 	defer surveyTearDown()
 
-	as.Stub([]*prompt.QuestionStub{
-		{
-			Name:  "repoVisibility",
-			Value: "PRIVATE",
-		},
-	})
-	as.Stub([]*prompt.QuestionStub{
-		{
-			Name:  "confirmSubmit",
-			Value: true,
-		},
-	})
-
-	output, err := runCommand(httpClient, "REPO --template='OWNER/REPO'")
+	output, err := runCommand(httpClient, "REPO -y --private --template='OWNER/REPO'", true)
 	if err != nil {
 		t.Errorf("error running command `repo create`: %v", err)
+		return
 	}
 
 	assert.Equal(t, "", output.String())
-	assert.Equal(t, "✓ Created repository OWNER/REPO on GitHub\n✓ Added remote https://github.com/OWNER/REPO.git\n", output.Stderr())
-
-	if seenCmd == nil {
-		t.Fatal("expected a command to run")
-	}
-	assert.Equal(t, "git remote add -f origin https://github.com/OWNER/REPO.git", strings.Join(seenCmd.Args, " "))
+	assert.Equal(t, heredoc.Doc(`
+		✓ Created repository OWNER/REPO on GitHub
+		✓ Initialized repository in "REPO"
+	`), output.Stderr())
 
 	var reqBody struct {
 		Query     string
 		Variables struct {
 			Input map[string]interface{}
 		}
-	}
-
-	if len(reg.Requests) != 3 {
-		t.Fatalf("expected 3 HTTP requests, got %d", len(reg.Requests))
 	}
 
 	bodyBytes, _ := ioutil.ReadAll(reg.Requests[2].Body)
@@ -410,12 +433,11 @@ func TestRepoCreate_withoutNameArg(t *testing.T) {
 		} } }`))
 	httpClient := &http.Client{Transport: reg}
 
-	var seenCmd *exec.Cmd
-	restoreCmd := run.SetPrepareCmd(func(cmd *exec.Cmd) run.Runnable {
-		seenCmd = cmd
-		return &test.OutputStub{}
-	})
-	defer restoreCmd()
+	cs, cmdTeardown := run.Stub()
+	defer cmdTeardown(t)
+
+	cs.Register(`git remote add -f origin https://github\.com/OWNER/REPO\.git`, 0, "")
+	cs.Register(`git rev-parse --show-toplevel`, 0, "")
 
 	as, surveyTearDown := prompt.InitAskStubber()
 	defer surveyTearDown()
@@ -441,18 +463,13 @@ func TestRepoCreate_withoutNameArg(t *testing.T) {
 		},
 	})
 
-	output, err := runCommand(httpClient, "")
+	output, err := runCommand(httpClient, "", true)
 	if err != nil {
 		t.Errorf("error running command `repo create`: %v", err)
 	}
 
 	assert.Equal(t, "", output.String())
 	assert.Equal(t, "✓ Created repository OWNER/REPO on GitHub\n✓ Added remote https://github.com/OWNER/REPO.git\n", output.Stderr())
-
-	if seenCmd == nil {
-		t.Fatal("expected a command to run")
-	}
-	assert.Equal(t, "git remote add -f origin https://github.com/OWNER/REPO.git", strings.Join(seenCmd.Args, " "))
 
 	var reqBody struct {
 		Query     string

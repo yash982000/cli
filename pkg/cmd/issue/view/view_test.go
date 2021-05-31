@@ -5,10 +5,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"os/exec"
 	"testing"
+	"time"
 
-	"github.com/briandowns/spinner"
 	"github.com/cli/cli/internal/config"
 	"github.com/cli/cli/internal/ghrepo"
 	"github.com/cli/cli/internal/run"
@@ -16,7 +15,6 @@ import (
 	"github.com/cli/cli/pkg/httpmock"
 	"github.com/cli/cli/pkg/iostreams"
 	"github.com/cli/cli/test"
-	"github.com/cli/cli/utils"
 	"github.com/google/shlex"
 	"github.com/stretchr/testify/assert"
 )
@@ -60,69 +58,45 @@ func runCommand(rt http.RoundTripper, isTTY bool, cli string) (*test.CmdOut, err
 }
 
 func TestIssueView_web(t *testing.T) {
-	http := &httpmock.Registry{}
-	defer http.Verify(t)
+	io, _, stdout, stderr := iostreams.Test()
+	io.SetStdoutTTY(true)
+	io.SetStderrTTY(true)
+	browser := &cmdutil.TestBrowser{}
 
-	http.StubResponse(200, bytes.NewBufferString(`
-	{ "data": { "repository": { "hasIssuesEnabled": true, "issue": {
-		"number": 123,
-		"url": "https://github.com/OWNER/REPO/issues/123"
-	} } } }
-	`))
+	reg := &httpmock.Registry{}
+	defer reg.Verify(t)
 
-	var seenCmd *exec.Cmd
-	restoreCmd := run.SetPrepareCmd(func(cmd *exec.Cmd) run.Runnable {
-		seenCmd = cmd
-		return &test.OutputStub{}
+	reg.Register(
+		httpmock.GraphQL(`query IssueByNumber\b`),
+		httpmock.StringResponse(`
+			{ "data": { "repository": { "hasIssuesEnabled": true, "issue": {
+				"number": 123,
+				"url": "https://github.com/OWNER/REPO/issues/123"
+			} } } }
+		`))
+
+	_, cmdTeardown := run.Stub()
+	defer cmdTeardown(t)
+
+	err := viewRun(&ViewOptions{
+		IO:      io,
+		Browser: browser,
+		HttpClient: func() (*http.Client, error) {
+			return &http.Client{Transport: reg}, nil
+		},
+		BaseRepo: func() (ghrepo.Interface, error) {
+			return ghrepo.New("OWNER", "REPO"), nil
+		},
+		WebMode:     true,
+		SelectorArg: "123",
 	})
-	defer restoreCmd()
-
-	output, err := runCommand(http, true, "-w 123")
 	if err != nil {
 		t.Errorf("error running command `issue view`: %v", err)
 	}
 
-	assert.Equal(t, "", output.String())
-	assert.Equal(t, "Opening github.com/OWNER/REPO/issues/123 in your browser.\n", output.Stderr())
-
-	if seenCmd == nil {
-		t.Fatal("expected a command to run")
-	}
-	url := seenCmd.Args[len(seenCmd.Args)-1]
-	assert.Equal(t, "https://github.com/OWNER/REPO/issues/123", url)
-}
-
-func TestIssueView_web_numberArgWithHash(t *testing.T) {
-	http := &httpmock.Registry{}
-	defer http.Verify(t)
-
-	http.StubResponse(200, bytes.NewBufferString(`
-	{ "data": { "repository": { "hasIssuesEnabled": true, "issue": {
-		"number": 123,
-		"url": "https://github.com/OWNER/REPO/issues/123"
-	} } } }
-	`))
-
-	var seenCmd *exec.Cmd
-	restoreCmd := run.SetPrepareCmd(func(cmd *exec.Cmd) run.Runnable {
-		seenCmd = cmd
-		return &test.OutputStub{}
-	})
-	defer restoreCmd()
-
-	output, err := runCommand(http, true, "-w \"#123\"")
-	if err != nil {
-		t.Errorf("error running command `issue view`: %v", err)
-	}
-
-	assert.Equal(t, "", output.String())
-	assert.Equal(t, "Opening github.com/OWNER/REPO/issues/123 in your browser.\n", output.Stderr())
-
-	if seenCmd == nil {
-		t.Fatal("expected a command to run")
-	}
-	url := seenCmd.Args[len(seenCmd.Args)-1]
-	assert.Equal(t, "https://github.com/OWNER/REPO/issues/123", url)
+	assert.Equal(t, "", stdout.String())
+	assert.Equal(t, "Opening github.com/OWNER/REPO/issues/123 in your browser.\n", stderr.String())
+	browser.Verify(t, "https://github.com/OWNER/REPO/issues/123")
 }
 
 func TestIssueView_nontty_Preview(t *testing.T) {
@@ -190,6 +164,7 @@ func TestIssueView_nontty_Preview(t *testing.T) {
 
 			assert.Equal(t, "", output.Stderr())
 
+			//nolint:staticcheck // prefer exact matchers over ExpectLines
 			test.ExpectLines(t, output.String(), tc.expectedOutputs...)
 		})
 	}
@@ -244,19 +219,38 @@ func TestIssueView_tty_Preview(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			http := &httpmock.Registry{}
-			defer http.Verify(t)
+			io, _, stdout, stderr := iostreams.Test()
+			io.SetStdoutTTY(true)
+			io.SetStdinTTY(true)
+			io.SetStderrTTY(true)
 
-			http.Register(httpmock.GraphQL(`query IssueByNumber\b`), httpmock.FileResponse(tc.fixture))
+			httpReg := &httpmock.Registry{}
+			defer httpReg.Verify(t)
 
-			output, err := runCommand(http, true, "123")
-			if err != nil {
-				t.Errorf("error running `issue view`: %v", err)
+			httpReg.Register(httpmock.GraphQL(`query IssueByNumber\b`), httpmock.FileResponse(tc.fixture))
+
+			opts := ViewOptions{
+				IO: io,
+				Now: func() time.Time {
+					t, _ := time.Parse(time.RFC822, "03 Nov 20 15:04 UTC")
+					return t
+				},
+				HttpClient: func() (*http.Client, error) {
+					return &http.Client{Transport: httpReg}, nil
+				},
+				BaseRepo: func() (ghrepo.Interface, error) {
+					return ghrepo.New("OWNER", "REPO"), nil
+				},
+				SelectorArg: "123",
 			}
 
-			assert.Equal(t, "", output.Stderr())
+			err := viewRun(&opts)
+			assert.NoError(t, err)
 
-			test.ExpectLines(t, output.String(), tc.expectedOutputs...)
+			assert.Equal(t, "", stderr.String())
+
+			//nolint:staticcheck // prefer exact matchers over ExpectLines
+			test.ExpectLines(t, stdout.String(), tc.expectedOutputs...)
 		})
 	}
 }
@@ -265,26 +259,21 @@ func TestIssueView_web_notFound(t *testing.T) {
 	http := &httpmock.Registry{}
 	defer http.Verify(t)
 
-	http.StubResponse(200, bytes.NewBufferString(`
-	{ "errors": [
-		{ "message": "Could not resolve to an Issue with the number of 9999." }
-	] }
-	`))
+	http.Register(
+		httpmock.GraphQL(`query IssueByNumber\b`),
+		httpmock.StringResponse(`
+			{ "errors": [
+				{ "message": "Could not resolve to an Issue with the number of 9999." }
+			] }
+			`),
+	)
 
-	var seenCmd *exec.Cmd
-	restoreCmd := run.SetPrepareCmd(func(cmd *exec.Cmd) run.Runnable {
-		seenCmd = cmd
-		return &test.OutputStub{}
-	})
-	defer restoreCmd()
+	_, cmdTeardown := run.Stub()
+	defer cmdTeardown(t)
 
 	_, err := runCommand(http, true, "-w 9999")
 	if err == nil || err.Error() != "GraphQL error: Could not resolve to an Issue with the number of 9999." {
 		t.Errorf("error running command `issue view`: %v", err)
-	}
-
-	if seenCmd != nil {
-		t.Fatal("did not expect any command to run")
 	}
 }
 
@@ -292,49 +281,20 @@ func TestIssueView_disabledIssues(t *testing.T) {
 	http := &httpmock.Registry{}
 	defer http.Verify(t)
 
-	http.StubResponse(200, bytes.NewBufferString(`
-		{ "data": { "repository": {
-			"id": "REPOID",
-			"hasIssuesEnabled": false
-		} } }
-	`))
+	http.Register(
+		httpmock.GraphQL(`query IssueByNumber\b`),
+		httpmock.StringResponse(`
+			{ "data": { "repository": {
+				"id": "REPOID",
+				"hasIssuesEnabled": false
+			} } }
+		`),
+	)
 
 	_, err := runCommand(http, true, `6666`)
 	if err == nil || err.Error() != "the 'OWNER/REPO' repository has disabled issues" {
 		t.Errorf("error running command `issue view`: %v", err)
 	}
-}
-
-func TestIssueView_web_urlArg(t *testing.T) {
-	http := &httpmock.Registry{}
-	defer http.Verify(t)
-
-	http.StubResponse(200, bytes.NewBufferString(`
-	{ "data": { "repository": { "hasIssuesEnabled": true, "issue": {
-		"number": 123,
-		"url": "https://github.com/OWNER/REPO/issues/123"
-	} } } }
-	`))
-
-	var seenCmd *exec.Cmd
-	restoreCmd := run.SetPrepareCmd(func(cmd *exec.Cmd) run.Runnable {
-		seenCmd = cmd
-		return &test.OutputStub{}
-	})
-	defer restoreCmd()
-
-	output, err := runCommand(http, true, "-w https://github.com/OWNER/REPO/issues/123")
-	if err != nil {
-		t.Errorf("error running command `issue view`: %v", err)
-	}
-
-	assert.Equal(t, "", output.String())
-
-	if seenCmd == nil {
-		t.Fatal("expected a command to run")
-	}
-	url := seenCmd.Args[len(seenCmd.Args)-1]
-	assert.Equal(t, "https://github.com/OWNER/REPO/issues/123", url)
 }
 
 func TestIssueView_tty_Comments(t *testing.T) {
@@ -352,8 +312,8 @@ func TestIssueView_tty_Comments(t *testing.T) {
 			expectedOutputs: []string{
 				`some title`,
 				`some body`,
-				`———————— Not showing 4 comments ————————`,
-				`marseilles \(collaborator\) • Jan  1, 2020 • Newest comment`,
+				`———————— Not showing 5 comments ————————`,
+				`marseilles \(Collaborator\) • Jan  1, 2020 • Newest comment`,
 				`Comment 5`,
 				`Use --comments to view the full conversation`,
 				`View this issue on GitHub: https://github.com/OWNER/REPO/issues/123`,
@@ -368,16 +328,17 @@ func TestIssueView_tty_Comments(t *testing.T) {
 			expectedOutputs: []string{
 				`some title`,
 				`some body`,
-				`monalisa • Jan  1, 2020 • edited`,
+				`monalisa • Jan  1, 2020 • Edited`,
 				`1 \x{1f615} • 2 \x{1f440} • 3 \x{2764}\x{fe0f} • 4 \x{1f389} • 5 \x{1f604} • 6 \x{1f680} • 7 \x{1f44e} • 8 \x{1f44d}`,
 				`Comment 1`,
-				`johnnytest \(contributor\) • Jan  1, 2020`,
+				`johnnytest \(Contributor\) • Jan  1, 2020`,
 				`Comment 2`,
-				`elvisp \(member\) • Jan  1, 2020`,
+				`elvisp \(Member\) • Jan  1, 2020`,
 				`Comment 3`,
-				`loislane \(owner\) • Jan  1, 2020`,
+				`loislane \(Owner\) • Jan  1, 2020`,
 				`Comment 4`,
-				`marseilles \(collaborator\) • Jan  1, 2020 • Newest comment`,
+				`sam-spam • This comment has been marked as spam`,
+				`marseilles \(Collaborator\) • Jan  1, 2020 • Newest comment`,
 				`Comment 5`,
 				`View this issue on GitHub: https://github.com/OWNER/REPO/issues/123`,
 			},
@@ -389,7 +350,6 @@ func TestIssueView_tty_Comments(t *testing.T) {
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			stubSpinner()
 			http := &httpmock.Registry{}
 			defer http.Verify(t)
 			for name, file := range tc.fixtures {
@@ -403,6 +363,7 @@ func TestIssueView_tty_Comments(t *testing.T) {
 			}
 			assert.NoError(t, err)
 			assert.Equal(t, "", output.Stderr())
+			//nolint:staticcheck // prefer exact matchers over ExpectLines
 			test.ExpectLines(t, output.String(), tc.expectedOutputs...)
 		})
 	}
@@ -424,7 +385,7 @@ func TestIssueView_nontty_Comments(t *testing.T) {
 				`title:\tsome title`,
 				`state:\tOPEN`,
 				`author:\tmarseilles`,
-				`comments:\t5`,
+				`comments:\t6`,
 				`some body`,
 			},
 		},
@@ -477,12 +438,8 @@ func TestIssueView_nontty_Comments(t *testing.T) {
 			}
 			assert.NoError(t, err)
 			assert.Equal(t, "", output.Stderr())
+			//nolint:staticcheck // prefer exact matchers over ExpectLines
 			test.ExpectLines(t, output.String(), tc.expectedOutputs...)
 		})
 	}
-}
-
-func stubSpinner() {
-	utils.StartSpinner = func(_ *spinner.Spinner) {}
-	utils.StopSpinner = func(_ *spinner.Spinner) {}
 }

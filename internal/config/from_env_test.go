@@ -13,11 +13,13 @@ func TestInheritEnv(t *testing.T) {
 	orig_GITHUB_ENTERPRISE_TOKEN := os.Getenv("GITHUB_ENTERPRISE_TOKEN")
 	orig_GH_TOKEN := os.Getenv("GH_TOKEN")
 	orig_GH_ENTERPRISE_TOKEN := os.Getenv("GH_ENTERPRISE_TOKEN")
+	orig_AppData := os.Getenv("AppData")
 	t.Cleanup(func() {
 		os.Setenv("GITHUB_TOKEN", orig_GITHUB_TOKEN)
 		os.Setenv("GITHUB_ENTERPRISE_TOKEN", orig_GITHUB_ENTERPRISE_TOKEN)
 		os.Setenv("GH_TOKEN", orig_GH_TOKEN)
 		os.Setenv("GH_ENTERPRISE_TOKEN", orig_GH_ENTERPRISE_TOKEN)
+		os.Setenv("AppData", orig_AppData)
 	})
 
 	type wants struct {
@@ -44,7 +46,7 @@ func TestInheritEnv(t *testing.T) {
 			wants: wants{
 				hosts:     []string(nil),
 				token:     "",
-				source:    "~/.config/gh/config.yml",
+				source:    ".config.gh.config.yml",
 				writeable: true,
 			},
 		},
@@ -80,7 +82,7 @@ func TestInheritEnv(t *testing.T) {
 			wants: wants{
 				hosts:     []string{"github.com"},
 				token:     "",
-				source:    "~/.config/gh/config.yml",
+				source:    ".config.gh.config.yml",
 				writeable: true,
 			},
 		},
@@ -92,7 +94,7 @@ func TestInheritEnv(t *testing.T) {
 			wants: wants{
 				hosts:     []string{"github.com"},
 				token:     "",
-				source:    "~/.config/gh/config.yml",
+				source:    ".config.gh.config.yml",
 				writeable: true,
 			},
 		},
@@ -131,7 +133,7 @@ func TestInheritEnv(t *testing.T) {
 			wants: wants{
 				hosts:     []string{"github.com"},
 				token:     "OTOKEN",
-				source:    "~/.config/gh/hosts.yml",
+				source:    ".config.gh.hosts.yml",
 				writeable: true,
 			},
 		},
@@ -264,6 +266,7 @@ func TestInheritEnv(t *testing.T) {
 			os.Setenv("GITHUB_ENTERPRISE_TOKEN", tt.GITHUB_ENTERPRISE_TOKEN)
 			os.Setenv("GH_TOKEN", tt.GH_TOKEN)
 			os.Setenv("GH_ENTERPRISE_TOKEN", tt.GH_ENTERPRISE_TOKEN)
+			os.Setenv("AppData", "")
 
 			baseCfg := NewFromString(tt.baseConfig)
 			cfg := InheritEnv(baseCfg)
@@ -273,13 +276,15 @@ func TestInheritEnv(t *testing.T) {
 
 			val, source, _ := cfg.GetWithSource(tt.hostname, "oauth_token")
 			assert.Equal(t, tt.wants.token, val)
-			assert.Equal(t, tt.wants.source, source)
+			assert.Regexp(t, tt.wants.source, source)
 
 			val, _ = cfg.Get(tt.hostname, "oauth_token")
 			assert.Equal(t, tt.wants.token, val)
 
 			err := cfg.CheckWriteable(tt.hostname, "oauth_token")
-			assert.Equal(t, tt.wants.writeable, err == nil)
+			if tt.wants.writeable != (err == nil) {
+				t.Errorf("CheckWriteable() = %v, wants %v", err, tt.wants.writeable)
+			}
 		})
 	}
 }

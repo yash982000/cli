@@ -9,7 +9,6 @@ import (
 	"github.com/cli/cli/api"
 	"github.com/cli/cli/git"
 	"github.com/cli/cli/internal/config"
-	"github.com/cli/cli/internal/ghinstance"
 	"github.com/cli/cli/internal/ghrepo"
 	"github.com/cli/cli/pkg/cmdutil"
 	"github.com/cli/cli/pkg/iostreams"
@@ -106,7 +105,11 @@ func cloneRun(opts *CloneOptions) error {
 		if repositoryIsFullName {
 			fullName = opts.Repository
 		} else {
-			currentUser, err := api.CurrentLoginName(apiClient, ghinstance.OverridableDefault())
+			host, err := cfg.DefaultHost()
+			if err != nil {
+				return err
+			}
+			currentUser, err := api.CurrentLoginName(apiClient, host)
 			if err != nil {
 				return err
 			}
@@ -159,7 +162,7 @@ func cloneRun(opts *CloneOptions) error {
 		}
 		upstreamURL := ghrepo.FormatRemoteURL(canonicalRepo.Parent, protocol)
 
-		err = git.AddUpstreamRemote(upstreamURL, cloneDir)
+		err = git.AddUpstreamRemote(upstreamURL, cloneDir, []string{canonicalRepo.Parent.DefaultBranchRef.Name})
 		if err != nil {
 			return err
 		}

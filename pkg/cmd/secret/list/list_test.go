@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cli/cli/internal/config"
 	"github.com/cli/cli/internal/ghrepo"
 	"github.com/cli/cli/pkg/cmd/secret/shared"
 	"github.com/cli/cli/pkg/cmdutil"
@@ -185,12 +186,16 @@ func Test_listRun(t *testing.T) {
 			tt.opts.HttpClient = func() (*http.Client, error) {
 				return &http.Client{Transport: reg}, nil
 			}
+			tt.opts.Config = func() (config.Config, error) {
+				return config.NewBlankConfig(), nil
+			}
 
 			err := listRun(tt.opts)
 			assert.NoError(t, err)
 
 			reg.Verify(t)
 
+			//nolint:staticcheck // prefer exact matchers over ExpectLines
 			test.ExpectLines(t, stdout.String(), tt.wantOut...)
 		})
 	}
